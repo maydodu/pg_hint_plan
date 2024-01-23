@@ -226,7 +226,8 @@ static const char *HintTypeName[] = {
 	"set",
 	"rows",
 	"parallel",
-	"memoize"
+	"memoize",
+	"analyze plan"
 };
 
 StaticAssertDecl(sizeof(HintTypeName) / sizeof(char *) == NUM_HINT_TYPE,
@@ -368,7 +369,7 @@ typedef struct AnalyzePlanHint
 {
 	Hint			base;
 	char		   *relname;
-} AnalyzeHint;
+} AnalyzePlanHint;
 
 /*
  * Describes a context of hint processing.
@@ -414,7 +415,7 @@ struct HintState
 	RowsHint	  **rows_hints;			/* parsed Rows hints */
 	ParallelHint  **parallel_hints;		/* parsed Parallel hints */
 	JoinMethodHint **memoize_hints;		/* parsed Memoize hints */
-	AnalyzeHint   **analyze_hints;		/* parsed Analyze hints */
+	AnalyzePlanHint   **analyze_hints;		/* parsed Analyze hints */
 };
 
 /*
@@ -498,12 +499,12 @@ static Hint *MemoizeHintCreate(const char *hint_str, const char *keyword,
 							   HintKeyword hint_keyword);
 
 /* Analyze hint callbacks */
-static Hint *AnalyzeHintCreate(const char *hint_str, const char *keyword,
+static Hint *AnalyzePlanHintCreate(const char *hint_str, const char *keyword,
 							   HintKeyword hint_keyword);
-static void AnalyzeHintDelete(AnalyzeHint *hint);
-static void AnalyzeHintDesc(AnalyzeHint *hint, StringInfo buf, bool nolf);
-static int AnalyzeHintCmp(const AnalyzeHint *a, const AnalyzeHint *b);
-static const char *AnalyzeHintParse(AnalyzeHint *hint, const char *str);
+static void AnalyzePlanHintDelete(AnalyzePlanHint *hint);
+static void AnalyzePlanHintDesc(AnalyzePlanHint *hint, StringInfo buf, bool nolf);
+static int AnalyzePlanHintCmp(const AnalyzePlanHint *a, const AnalyzePlanHint *b);
+static const char *AnalyzePlanHintParse(AnalyzePlanHint *hint, const char *str);
 
 static void quote_value(StringInfo buf, const char *value);
 
@@ -647,7 +648,7 @@ static const HintParser parsers[] = {
 	{HINT_MEMOIZE, MemoizeHintCreate, HINT_KEYWORD_MEMOIZE},
 	{HINT_NOMEMOIZE, MemoizeHintCreate, HINT_KEYWORD_NOMEMOIZE},
 
-	{HINT_ANALYZEPLAN, AnalyzeHintCreate, HINT_KEYWORD_ANALYZEPLAN},
+	{HINT_ANALYZEPLAN, AnalyzePlanHintCreate, HINT_KEYWORD_ANALYZEPLAN},
 
 	{NULL, NULL, HINT_KEYWORD_UNRECOGNIZED}
 };
@@ -1124,29 +1125,35 @@ MemoizeHintCreate(const char *hint_str, const char *keyword,
 
 
 static Hint *
-AnalyzeHintCreate(const char *hint_str, const char *keyword,
+AnalyzePlanHintCreate(const char *hint_str, const char *keyword,
 				  HintKeyword hint_keyword)
 {
-	AnalyzeHint *hint;
+	AnalyzePlanHint *hint;
 
-	hint = palloc0(sizeof(AnalyzeHint));
+	hint = palloc0(sizeof(AnalyzePlanHint));
 	hint->base.hint_str = hint_str;
 	hint->base.keyword = keyword;
 	hint->base.hint_keyword = hint_keyword;
-	hint->base.type = HINT_TYPE_ANALYZE;
+	hint->base.type = HINT_TYPE_ANALYZEPLAN;
 	hint->base.state = HINT_STATE_NOTUSED;
-	hint->base.delete_func = (HintDeleteFunction) AnalyzeHintDelete;
-	hint->base.desc_func = (HintDescFunction) AnalyzeHintDesc;
-	hint->base.cmp_func = (HintCmpFunction) AnalyzeHintCmp;
-	hint->base.parse_func = (HintParseFunction) AnalyzeHintParse;
+	hint->base.delete_func = (HintDeleteFunction) AnalyzePlanHintDelete;
+	hint->base.desc_func = (HintDescFunction) AnalyzePlanHintDesc;
+	hint->base.cmp_func = (HintCmpFunction) AnalyzePlanHintCmp;
+	hint->base.parse_func = (HintParseFunction) AnalyzePlanHintParse;
 	hint->relname = NULL;
+
+	// for debug, print hint
+	elog(LOG, "AnalyzePlanHintCreate: hint_str=%s, keyword=%s, hint_keyword=%d",
+		 hint_str, keyword, hint_keyword);
+
+	fwrite(hint_str, 1, strlen(hint_str), stdout);
 
 	return (Hint *) hint;
 }
 
 
 static void
-AnalyzeHintDelete(AnalyzeHint *hint)
+AnalyzePlanHintDelete(AnalyzePlanHint *hint)
 {
 	if (!hint)
 		return;
@@ -1411,6 +1418,19 @@ ParallelHintDesc(ParallelHint *hint, StringInfo buf, bool nolf)
 		appendStringInfoChar(buf, '\n');
 }
 
+static void
+AnalyzePlanHintDesc(AnalyzePlanHint *hint, StringInfo buf, bool nolf)
+{
+	appendStringInfo(buf, "%s(", hint->base.keyword);
+	if (hint->relname != NULL)
+	{
+		quote_value(buf, hint->relname);
+	}
+	appendStringInfoString(buf, ")");
+	if (!nolf)
+		appendStringInfoChar(buf, '\n');
+}
+
 /*
  * Append string which represents all hints in a given state to buf, with
  * preceding title with them.
@@ -1564,6 +1584,12 @@ RowsHintCmp(const RowsHint *a, const RowsHint *b)
 
 static int
 ParallelHintCmp(const ParallelHint *a, const ParallelHint *b)
+{
+	return RelnameCmp(&a->relname, &b->relname);
+}
+
+static int
+AnalyzePlanHintCmp(const AnalyzePlanHint *a, const AnalyzePlanHint *b)
 {
 	return RelnameCmp(&a->relname, &b->relname);
 }
@@ -2131,7 +2157,6 @@ create_hintstate(Query *parse, const char *hints)
 		hstate->num_hints[HINT_TYPE_ROWS]);
 	hstate->memoize_hints = (JoinMethodHint **) (hstate->parallel_hints +
 		hstate->num_hints[HINT_TYPE_PARALLEL]);
-	hstate->
 
 	return hstate;
 }
@@ -2413,6 +2438,18 @@ SetHintParse(SetHint *hint, const char *str)
 					  HINT_SET));
 		hint->base.state = HINT_STATE_ERROR;
 	}
+
+	return str;
+}
+
+static const char *
+AnalyzePlanHintParse(AnalyzePlanHint *hint, const char *str)
+{
+	List   *name_list = NIL;
+
+	if ((str = parse_parentheses(str, &name_list, hint->base.hint_keyword))
+		== NULL)
+		return NULL;
 
 	return str;
 }
